@@ -6,7 +6,7 @@ type GameState = 'START' | 'PLAYING' | 'GAME_OVER';
 
 const BALL_RADIUS = 45;
 const HOOP_RADIUS = 6;
-const HOOP_WIDTH = 120;
+const HOOP_WIDTH = 90;
 
 const CATEGORY_BALL = 0x0001;
 const CATEGORY_WALL = 0x0002;
@@ -85,6 +85,7 @@ export default function App() {
   const [gameState, setGameState] = useState<GameState>('START');
   const [score, setScore] = useState(0);
   const [bestScore, setBestScore] = useState(() => parseInt(localStorage.getItem('basketball_best') || '0'));
+  const [totalGoals, setTotalGoals] = useState(() => parseInt(localStorage.getItem('basketball_total') || '0'));
   const [floatingTexts, setFloatingTexts] = useState<{id: number, x: number, y: number}[]>([]);
   
   const containerRef = useRef<HTMLDivElement>(null);
@@ -94,7 +95,7 @@ export default function App() {
   const runnerRef = useRef<Matter.Runner | null>(null);
   
   const ballRef = useRef<Matter.Body | null>(null);
-  const hoopPartsRef = useRef<{rimL: Matter.Body, rimR: Matter.Body, sensor: Matter.Body} | null>(null);
+  const hoopPartsRef = useRef<{rimL: Matter.Body, rimR: Matter.Body} | null>(null);
   
   const reqRef = useRef<number>(0);
   
@@ -119,7 +120,16 @@ export default function App() {
     netVelocity: 0,
     bestScore: parseInt(localStorage.getItem('basketball_best') || '0'),
     hoopPhaseX: 0,
-    hoopPhaseY: 0
+    hoopPhaseY: 0,
+    hoopAmpX: 0,
+    hoopAmpY: 0,
+    netSway: 0,
+    netSwayVelocity: 0,
+    netBulge: 0,
+    netBulgeVelocity: 0,
+    ballTrail: [] as {x: number, y: number, scale: number}[],
+    ballScale: 1.0,
+    highestY: 0
   });
 
   const setGameStateSafe = (newState: GameState) => {
@@ -131,7 +141,9 @@ export default function App() {
       if (engineRef.current) return;
 
       const engine = Matter.Engine.create({
-          gravity: { x: 0, y: 1.0, scale: 0.0025 } // Adjusted gravity
+          gravity: { x: 0, y: 1.0, scale: 0.0025 }, // Adjusted gravity
+          positionIterations: 8,
+          velocityIterations: 8
       });
       engineRef.current = engine;
 
@@ -149,7 +161,7 @@ export default function App() {
       ]);
 
       // Ball
-      const ball = Matter.Bodies.circle(width / 2, height - 150 - BALL_RADIUS, BALL_RADIUS, {
+      const ball = Matter.Bodies.circle(width / 2, height - 110 - BALL_RADIUS, BALL_RADIUS, {
           restitution: 0.6,
           friction: 0.005,
           density: 0.005, // Lower density makes it lighter, requiring less force
@@ -179,37 +191,8 @@ export default function App() {
       const rimL = Matter.Bodies.circle(0, 0, HOOP_RADIUS, hoopOptions);
       const rimR = Matter.Bodies.circle(0, 0, HOOP_RADIUS, hoopOptions);
       
-      const sensor = Matter.Bodies.rectangle(0, 0, 30, 10, {
-          isStatic: true,
-          isSensor: true,
-          collisionFilter: { category: CATEGORY_SENSOR, mask: CATEGORY_BALL },
-          label: 'sensor'
-      });
-
-      hoopPartsRef.current = { rimL, rimR, sensor };
-      Matter.Composite.add(engine.world, [rimL, rimR, sensor]);
-
-      // Collision events
-      Matter.Events.on(engine, 'collisionStart', (event) => {
-          const pairs = event.pairs;
-          for (let i = 0; i < pairs.length; i++) {
-              const { bodyA, bodyB } = pairs[i];
-              const sensorBody = hoopPartsRef.current?.sensor;
-              const currentBall = ballRef.current;
-              
-              if (sensorBody && currentBall) {
-                  if ((bodyA === sensorBody && bodyB === currentBall) || (bodyB === sensorBody && bodyA === currentBall)) {
-                      // Only score if falling down and horizontally within the hoop
-                      if (stateRef.current.gameState === 'PLAYING' && currentBall.velocity.y > 0 && !stateRef.current.hasScored) {
-                          const dx = Math.abs(currentBall.position.x - sensorBody.position.x);
-                          if (dx < 40) {
-                              scorePoint();
-                          }
-                      }
-                  }
-              }
-          }
-      });
+      hoopPartsRef.current = { rimL, rimR };
+      Matter.Composite.add(engine.world, [rimL, rimR]);
 
       const runner = Matter.Runner.create();
       runnerRef.current = runner;
@@ -227,6 +210,10 @@ export default function App() {
       const newScore = stateRef.current.score + 1;
       stateRef.current.score = newScore;
       setScore(newScore);
+      
+      const newTotal = (parseInt(localStorage.getItem('basketball_total') || '0')) + 1;
+      localStorage.setItem('basketball_total', newTotal.toString());
+      setTotalGoals(newTotal);
       
       if (newScore > stateRef.current.bestScore) {
           stateRef.current.bestScore = newScore;
@@ -247,12 +234,16 @@ export default function App() {
       if (ballRef.current && containerRef.current) {
           const { width, height } = containerRef.current.getBoundingClientRect();
           Matter.Body.setStatic(ballRef.current, true);
-          Matter.Body.setPosition(ballRef.current, { x: width / 2, y: height - 150 - BALL_RADIUS });
+          const factor = 1.0 / stateRef.current.ballScale;
+          Matter.Body.scale(ballRef.current, factor, factor);
+          Matter.Body.setPosition(ballRef.current, { x: width / 2, y: height - 110 - BALL_RADIUS });
           Matter.Body.setVelocity(ballRef.current, { x: 0, y: 0 });
           Matter.Body.setAngularVelocity(ballRef.current, 0);
           stateRef.current.ballCanShoot = true;
           stateRef.current.hasScored = false;
           stateRef.current.isAboveHoop = false;
+          stateRef.current.ballScale = 1.0;
+          stateRef.current.highestY = height;
           ballRef.current.collisionFilter.mask = CATEGORY_WALL | CATEGORY_SENSOR;
       }
   };
@@ -316,26 +307,38 @@ export default function App() {
               const clampedDx = Math.max(-150, Math.min(150, dx));
               const clampedDy = Math.max(-200, Math.min(-20, dy));
               
-              // Calculate distance to hoop
+              // Calculate distance to hoop using BASE Y for consistent force mapping
               const ballPos = ballRef.current.position;
-              const hoopY = stateRef.current.hoopY;
-              const distanceY = Math.max(200, ballPos.y - hoopY); // Positive value, e.g. 400
+              const hoopBaseY = stateRef.current.hoopBaseY;
+              const distanceY = Math.max(200, ballPos.y - hoopBaseY); // Positive value, e.g. 400
               
               // Base multiplier on distance to ensure the ball can reach the hoop
               const distanceRatio = Math.sqrt(distanceY / 400);
               const swipeRatioY = Math.sqrt(Math.abs(clampedDy) / 100);
               
-              // Map distance to velocity. 
-              const vy = -23 * swipeRatioY * distanceRatio; 
-              const vx = clampedDx * 0.08 * distanceRatio;
+              // Map distance to velocity. Force a minimum upward velocity for a nice parabola.
+              let vy = -26 * swipeRatioY * distanceRatio; 
+              if (vy < -32) vy = -32; // Cap maximum height (just above backboard)
+              if (vy > -22) vy = -22; // Minimum height to reach hoop
+              
+              // Aim Assist: Calculate ideal VX to reach hoop
+              const { width } = containerRef.current.getBoundingClientRect();
+              const hoopX = hoopPartsRef.current?.rimL?.position?.x ? hoopPartsRef.current.rimL.position.x + HOOP_WIDTH/2 : width/2;
+              const timeToHoop = Math.abs(distanceY / vy) * 1.8; // Rough estimate of time to reach hoop height
+              const idealVx = (hoopX - ballPos.x) / timeToHoop;
+              
+              // Blend player's swipe VX with ideal VX (70% aim assist for better hit rate)
+              const playerVx = clampedDx * 0.10 * distanceRatio;
+              const vx = playerVx * 0.3 + idealVx * 0.7;
               
               Matter.Body.setStatic(ballRef.current, false);
               Matter.Sleeping.set(ballRef.current, false);
               
               // Apply velocity
               Matter.Body.setVelocity(ballRef.current, { x: vx, y: vy });
-              Matter.Body.setAngularVelocity(ballRef.current, vx * 0.02);
+              Matter.Body.setAngularVelocity(ballRef.current, vx * 0.005 - 0.15); // Add backspin
               stateRef.current.ballCanShoot = false;
+              stateRef.current.highestY = ballRef.current.position.y;
               
               playShootSound();
           }
@@ -349,75 +352,101 @@ export default function App() {
 
       const { width, height } = canvas;
       const { hoopY, netStretch } = stateRef.current;
-      const hoopX = hoopPartsRef.current?.rimL.position.x ? hoopPartsRef.current.rimL.position.x + HOOP_WIDTH/2 : width/2;
+      const hoopX = hoopPartsRef.current?.rimL?.position?.x ? hoopPartsRef.current.rimL.position.x + HOOP_WIDTH/2 : width/2;
       const startY = height - 150;
 
       ctx.clearRect(0, 0, width, height);
 
-      // Background (Wall)
+      // 1. Background (Wall)
       ctx.fillStyle = '#90C8C6';
       ctx.fillRect(0, 0, width, height);
 
-      // 3D Floor (Trapezoid)
-      const horizonY = stateRef.current.hoopBaseY + 160; // The line where wall meets floor
+      // 2. Floor
+      const floorY = height - 150;
       
+      // Floor shadow/depth
+      ctx.fillStyle = '#2C5A63';
+      ctx.fillRect(0, floorY, width, height - floorY);
+      
+      // Floor top surface
+      ctx.fillStyle = '#3A7580';
       ctx.beginPath();
-      ctx.moveTo(width / 2 - 120, horizonY); // Top left
-      ctx.lineTo(width / 2 + 120, horizonY); // Top right
-      ctx.lineTo(width / 2 + 300, height); // Bottom right
-      ctx.lineTo(width / 2 - 300, height); // Bottom left
-      ctx.closePath();
-      
-      ctx.fillStyle = '#367484'; // Floor inner color
+      ctx.moveTo(0, floorY + 50);
+      ctx.lineTo(width * 0.15, floorY);
+      ctx.lineTo(width * 0.85, floorY);
+      ctx.lineTo(width, floorY + 50);
+      ctx.lineTo(width, height);
+      ctx.lineTo(0, height);
       ctx.fill();
+
+      // Floor border
+      ctx.strokeStyle = '#D35400';
       ctx.lineWidth = 8;
-      ctx.strokeStyle = '#C36B35'; // Floor border color
+      ctx.beginPath();
+      ctx.moveTo(-10, floorY + 50);
+      ctx.lineTo(width * 0.15, floorY);
+      ctx.lineTo(width * 0.85, floorY);
+      ctx.lineTo(width + 10, floorY + 50);
       ctx.stroke();
 
-      const bbWidth = 240;
-      const bbHeight = 160;
-      const bbX = hoopX - bbWidth/2;
-      const bbY = hoopY - 150;
-
-      // Draw Backboard Outer
-      ctx.fillStyle = '#C36B35';
-      ctx.fillRect(bbX, bbY, bbWidth, bbHeight);
-      
-      // Draw Backboard Inner
-      ctx.fillStyle = '#367484';
-      ctx.fillRect(bbX + 8, bbY + 8, bbWidth - 16, bbHeight - 16);
-      
-      // Backboard Inner Shadow/Highlight (Two-tone effect)
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.05)';
+      // Inner court line
+      ctx.strokeStyle = '#2C5A63';
+      ctx.lineWidth = 4;
       ctx.beginPath();
-      ctx.moveTo(bbX + bbWidth/2, bbY + 8);
-      ctx.lineTo(bbX + bbWidth - 8, bbY + 8);
-      ctx.lineTo(bbX + bbWidth - 8, bbY + bbHeight - 8);
-      ctx.lineTo(bbX + bbWidth/2, bbY + bbHeight - 8);
+      ctx.moveTo(0, floorY + 60);
+      ctx.lineTo(width * 0.15 + 5, floorY + 10);
+      ctx.lineTo(width * 0.85 - 5, floorY + 10);
+      ctx.lineTo(width, floorY + 60);
+      ctx.stroke();
+
+      // Ball Shadow on Floor
+      const shadowY = floorY + 40; // The ground level for the ball
+      if (ballRef.current && ballRef.current.position.y > shadowY - 200) {
+          const heightFromGround = shadowY - BALL_RADIUS - ballRef.current.position.y;
+          const shadowScale = Math.max(0, 1 - heightFromGround / 200);
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+          ctx.beginPath();
+          ctx.ellipse(ballRef.current.position.x, shadowY, 45 * stateRef.current.ballScale * shadowScale, 12 * stateRef.current.ballScale * shadowScale, 0, 0, Math.PI * 2);
+          ctx.fill();
+      }
+
+      // 3. Backboard Shadow
+      const bbW = 260;
+      const bbH = 180;
+      const bbX = hoopX;
+      const bbY = hoopY - 50;
+      
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+      ctx.beginPath();
+      ctx.moveTo(bbX - bbW/2, bbY - bbH/2);
+      ctx.lineTo(bbX - bbW/2 + 1000, bbY - bbH/2 + 1000);
+      ctx.lineTo(bbX + bbW/2 + 1000, bbY + bbH/2 + 1000);
+      ctx.lineTo(bbX + bbW/2, bbY + bbH/2);
       ctx.fill();
+
+      // 4. Backboard
+      ctx.fillStyle = '#C04A15'; // Outer brown
+      ctx.fillRect(bbX - bbW/2, bbY - bbH/2, bbW, bbH);
+      ctx.fillStyle = '#E67E22'; // Inner orange
+      ctx.fillRect(bbX - bbW/2 + 6, bbY - bbH/2 + 6, bbW - 12, bbH - 12);
+      ctx.fillStyle = '#3A7580'; // Inner teal
+      ctx.fillRect(bbX - bbW/2 + 12, bbY - bbH/2 + 12, bbW - 24, bbH - 24);
 
       // Inner Yellow Square
-      const sqWidth = 80;
-      const sqHeight = 60;
-      ctx.strokeStyle = '#F4D04E';
-      ctx.lineWidth = 8;
-      ctx.lineJoin = 'round';
-      ctx.strokeRect(hoopX - sqWidth/2, hoopY - sqHeight - 5, sqWidth, sqHeight);
-
-      // Back Rim (Top half of ellipse)
-      ctx.strokeStyle = '#F26A36';
+      const sqW = 90;
+      const sqH = 70;
+      ctx.strokeStyle = '#F1C40F';
       ctx.lineWidth = 6;
-      ctx.beginPath();
-      ctx.ellipse(hoopX, hoopY, HOOP_WIDTH/2, 12, 0, Math.PI, Math.PI * 2);
-      ctx.stroke();
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.strokeRect(hoopX - sqW/2, hoopY - sqH, sqW, sqH);
 
       // Helper to draw the ball
       const drawBall = () => {
           if (!ballRef.current) return;
           const pos = ballRef.current.position;
           const angle = ballRef.current.angle;
-
-          let scale = 1.0;
+          let scale = stateRef.current.ballScale;
 
           ctx.save();
           ctx.translate(pos.x, pos.y);
@@ -425,19 +454,13 @@ export default function App() {
           ctx.scale(scale, scale);
 
           // Ball Base
-          ctx.fillStyle = '#E5733B';
+          ctx.fillStyle = '#D35400';
           ctx.beginPath();
           ctx.arc(0, 0, BALL_RADIUS, 0, Math.PI * 2);
           ctx.fill();
           
-          // Ball Highlight (Top Left)
-          ctx.fillStyle = '#F09A61';
-          ctx.beginPath();
-          ctx.arc(-BALL_RADIUS*0.3, -BALL_RADIUS*0.3, BALL_RADIUS*0.6, 0, Math.PI * 2);
-          ctx.fill();
-
           // Ball Lines
-          ctx.strokeStyle = '#C35325';
+          ctx.strokeStyle = '#8E3800';
           ctx.lineWidth = 2;
           ctx.beginPath();
           ctx.moveTo(0, -BALL_RADIUS);
@@ -451,23 +474,32 @@ export default function App() {
           ctx.stroke();
 
           ctx.restore();
+
+          // Fixed Highlight (doesn't rotate)
+          ctx.save();
+          ctx.translate(pos.x, pos.y);
+          ctx.scale(scale, scale);
+          ctx.beginPath();
+          ctx.arc(0, 0, BALL_RADIUS, 0, Math.PI * 2);
+          ctx.clip(); // Clip to ball bounds
+          
+          ctx.beginPath();
+          ctx.arc(-BALL_RADIUS*0.2, -BALL_RADIUS*0.2, BALL_RADIUS*0.8, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+          ctx.fill();
+          ctx.restore();
       };
 
       // Determine drawing order based on Z-depth (scale) and position
       let drawBallBehindFrontRim = false;
       if (ballRef.current) {
-          const pos = ballRef.current.position;
-          // If the ball is falling and is near the hoop opening, it's inside/behind the front rim
-          if (stateRef.current.isAboveHoop && pos.y < hoopY + 20) {
+          const ball = ballRef.current;
+          const isFalling = ball.velocity.y > 0;
+          const isBelowRimTop = ball.position.y > hoopY - 20;
+          const isNearHoopX = Math.abs(ball.position.x - hoopX) < HOOP_WIDTH / 2 + 30;
+          
+          if (isFalling && isBelowRimTop && isNearHoopX) {
               drawBallBehindFrontRim = true;
-          } else if (pos.y >= hoopY + 20 && pos.y < hoopY + 100 && ballRef.current.velocity.y > 0) {
-              // If the ball is falling through the net, it should be behind the front rim
-              // but in front of the backboard (handled by drawing order)
-              // We only want it behind the front rim if it actually went IN the hoop
-              // We can check if it's between the left and right rims
-              if (pos.x > hoopX - HOOP_WIDTH/2 && pos.x < hoopX + HOOP_WIDTH/2) {
-                  drawBallBehindFrontRim = true;
-              }
           }
       }
 
@@ -476,54 +508,99 @@ export default function App() {
           drawBall();
       }
 
-      // Front Rim (Bottom half of ellipse)
-      ctx.strokeStyle = '#F26A36';
-      ctx.lineWidth = 6;
-      ctx.beginPath();
-      ctx.ellipse(hoopX, hoopY, HOOP_WIDTH/2, 12, 0, 0, Math.PI);
-      ctx.stroke();
-
-      // Net
+      // 5. Net (4 ropes hanging down)
       ctx.strokeStyle = '#FFFFFF';
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
       ctx.beginPath();
       
-      const netTopL = hoopX - HOOP_WIDTH/2 + 2;
-      const netTopR = hoopX + HOOP_WIDTH/2 - 2;
+      const netTopW = HOOP_WIDTH;
+      const netBotW = netTopW * 0.6;
+      const netH = 65 + netStretch;
+      const rows = 3; // 3 rows for better mesh
+      const cols = 3; // 4 attachment points
+      const sway = stateRef.current.netSway;
+      const bulge = stateRef.current.netBulge;
+      const ballX = ballRef.current?.position.x || 0;
+      const ballY = ballRef.current?.position.y || 0;
       
-      const stretchRatio = Math.min(1, Math.max(0, netStretch / 80));
-      const netBottomWidth = (HOOP_WIDTH - 24) * (1 - stretchRatio * 0.4);
-      const netBottomL = hoopX - netBottomWidth/2;
-      const netBottomR = hoopX + netBottomWidth/2;
-      const netBottomY = hoopY + 45 + netStretch;
+      // Only move net if ball is falling through AND has scored
+      const isBallInNet = stateRef.current.hasScored && ballY > hoopY && ballY < hoopY + netH + 40 && Math.abs(ballX - hoopX) < HOOP_WIDTH * 0.8;
+      
+      const netPoints: {x: number, y: number}[][] = [];
+      for (let r = 0; r <= rows; r++) {
+          const t = r / rows;
+          // Taper the net more at the bottom
+          const w = netTopW - (netTopW - netBotW) * Math.pow(t, 0.7);
+          const y = hoopY + netH * t;
+          const rowPts = [];
+          for (let c = 0; c <= cols; c++) {
+              const ct = c / cols;
+              let x = hoopX - w/2 + sway * t + w * ct;
+              let by = y;
+              
+              if (isBallInNet) {
+                  const distY = Math.abs(ballY - y);
+                  if (distY < 50) {
+                      const bulgeAmt = (1 - distY/50) * 15 * stateRef.current.ballScale;
+                      const dir = (ct - 0.5) * 2; 
+                      x += dir * bulgeAmt;
+                      by += bulgeAmt * 0.3;
+                  }
+              }
+              
+              if (bulge < 0) {
+                  x += bulge * Math.sin(t * Math.PI) * (ct - 0.5) * 2;
+              }
+              
+              rowPts.push({x, y: by});
+          }
+          netPoints.push(rowPts);
+      }
 
-      // Draw outer curves (rope-like)
-      ctx.moveTo(netTopL, hoopY);
-      ctx.quadraticCurveTo(hoopX - HOOP_WIDTH/2 + 10 - stretchRatio * 15, hoopY + 20 + netStretch/2, netBottomL, netBottomY);
-      ctx.lineTo(netBottomR, netBottomY);
-      ctx.quadraticCurveTo(hoopX + HOOP_WIDTH/2 - 10 + stretchRatio * 15, hoopY + 20 + netStretch/2, netTopR, hoopY);
+      // Draw diamond pattern (V-shapes)
+      ctx.beginPath();
+      for (let r = 0; r < rows; r++) {
+          for (let c = 0; c <= cols; c++) {
+              // Left-to-right diagonal
+              if (c < cols) {
+                  ctx.moveTo(netPoints[r][c].x, netPoints[r][c].y);
+                  ctx.lineTo(netPoints[r+1][c+1].x, netPoints[r+1][c+1].y);
+              }
+              // Right-to-left diagonal
+              if (c > 0) {
+                  ctx.moveTo(netPoints[r][c].x, netPoints[r][c].y);
+                  ctx.lineTo(netPoints[r+1][c-1].x, netPoints[r+1][c-1].y);
+              }
+          }
+      }
       
-      // Net cross lines
-      for (let i = 1; i < 4; i++) {
-          const t = i / 4;
-          const yOffset = (45 + netStretch) * t;
-          const widthAtY = (HOOP_WIDTH - 4) - ((HOOP_WIDTH - 4) - netBottomWidth) * t;
-          ctx.moveTo(hoopX - widthAtY/2, hoopY + yOffset);
-          ctx.lineTo(hoopX + widthAtY/2, hoopY + yOffset);
-      }
-      for (let i = 1; i < 5; i++) {
-          const xOffsetTop = (HOOP_WIDTH - 4) * (i / 5);
-          const xOffsetBottom = netBottomWidth * (i / 5);
-          const startX = netTopL + xOffsetTop;
-          const endX = netBottomL + xOffsetBottom;
-          const midX = startX + (endX - startX) / 2;
-          const midY = hoopY + (45 + netStretch) / 2;
-          ctx.moveTo(startX, hoopY);
-          ctx.quadraticCurveTo(midX, midY, endX, netBottomY);
-      }
+      // Add some vertical-ish ropes for more detail if needed, 
+      // but the user said "look at the picture", and usually it's just this mesh.
+      // The key is that the bottom is NOT connected.
+      
       ctx.stroke();
 
-      // Draw Ball IF it is in front of the front rim
+      // 6. Front Rim (Straight Line)
+      ctx.beginPath();
+      ctx.moveTo(hoopX - HOOP_WIDTH/2 - 4, hoopY);
+      ctx.lineTo(hoopX + HOOP_WIDTH/2 + 4, hoopY);
+      ctx.strokeStyle = '#FF8C00';
+      ctx.lineWidth = 10;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+      
+      // Rim Highlight
+      ctx.beginPath();
+      ctx.moveTo(hoopX - HOOP_WIDTH/2 - 2, hoopY - 2);
+      ctx.lineTo(hoopX + HOOP_WIDTH/2 + 2, hoopY - 2);
+      ctx.strokeStyle = '#FFAA33';
+      ctx.lineWidth = 4;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+
+      // 7. Draw Ball IF it is in front of the front rim
       if (!drawBallBehindFrontRim) {
           drawBall();
       }
@@ -536,69 +613,159 @@ export default function App() {
           const parts = hoopPartsRef.current;
           
           // 1. Update Hoop Position based on score
+          let targetAmpX = 0;
+          let targetAmpY = 0;
           let speedX = 0;
           let speedY = 0;
+
           if (stateRef.current.score >= 10) {
-              speedX = Math.min(1 + (stateRef.current.score - 10) * 0.15, 3.5);
+              targetAmpX = width * 0.25;
+              speedX = Math.min(0.2 + (stateRef.current.score - 10) * 0.025, 0.625);
           }
           if (stateRef.current.score >= 20) {
-              speedY = Math.min(0.8 + (stateRef.current.score - 20) * 0.1, 2.5);
+              targetAmpY = height * 0.1;
+              speedY = Math.min(0.15 + (stateRef.current.score - 20) * 0.02, 0.5);
           }
 
-          stateRef.current.hoopPhaseX += speedX * 0.016;
-          stateRef.current.hoopPhaseY += speedY * 0.016;
+          // Smoothly interpolate amplitude to prevent teleporting
+          stateRef.current.hoopAmpX += (targetAmpX - stateRef.current.hoopAmpX) * 0.02;
+          stateRef.current.hoopAmpY += (targetAmpY - stateRef.current.hoopAmpY) * 0.02;
 
-          let targetX = stateRef.current.hoopBaseX;
-          let targetY = stateRef.current.hoopBaseY;
+          if (stateRef.current.hoopAmpX > 0.1) {
+              stateRef.current.hoopPhaseX += speedX * 0.016;
+          } else {
+              stateRef.current.hoopPhaseX = 0;
+          }
 
-          if (speedX > 0) {
-              targetX += Math.sin(stateRef.current.hoopPhaseX) * (width * 0.25);
+          if (stateRef.current.hoopAmpY > 0.1) {
+              stateRef.current.hoopPhaseY += speedY * 0.016;
+          } else {
+              stateRef.current.hoopPhaseY = 0;
           }
-          if (speedY > 0) {
-              targetY += Math.sin(stateRef.current.hoopPhaseY) * (height * 0.1);
-          }
+
+          let targetX = stateRef.current.hoopBaseX + Math.sin(stateRef.current.hoopPhaseX) * stateRef.current.hoopAmpX;
+          let targetY = stateRef.current.hoopBaseY + Math.sin(stateRef.current.hoopPhaseY) * stateRef.current.hoopAmpY;
 
           stateRef.current.hoopY = targetY;
           Matter.Body.setPosition(parts.rimL, { x: targetX - HOOP_WIDTH/2, y: targetY });
           Matter.Body.setPosition(parts.rimR, { x: targetX + HOOP_WIDTH/2, y: targetY });
-          Matter.Body.setPosition(parts.sensor, { x: targetX, y: targetY + 40 });
+          // Reset velocity and positionPrev to prevent static bodies from imparting high elasticity to the ball
+          Matter.Body.setVelocity(parts.rimL, { x: 0, y: 0 });
+          Matter.Body.setVelocity(parts.rimR, { x: 0, y: 0 });
+          parts.rimL.positionPrev.x = parts.rimL.position.x;
+          parts.rimL.positionPrev.y = parts.rimL.position.y;
+          parts.rimR.positionPrev.x = parts.rimR.position.x;
+          parts.rimR.positionPrev.y = parts.rimR.position.y;
 
-          // 2. 3D Depth Illusion (Hysteresis Collision)
+          // 2. 3D Depth Illusion (Perspective Projection) & Scaling
+          // Assuming player is 8m away, hoop is 10m away (2m difference).
+          // Scale = Distance_Start / Distance_Current = 8 / (8 + 2 * progress)
+          const startY = height - 110 - BALL_RADIUS;
+          const currentYForScale = ball.velocity.y < 0 ? ball.position.y : stateRef.current.highestY;
+          const progress = (startY - currentYForScale) / (startY - targetY);
+          
+          // Perspective formula: 1 / (1 + 0.25 * progress)
+          // At progress = 0 (start), scale = 1.0
+          // At progress = 1.0 (hoop), scale = 1 / 1.25 = 0.8
+          let targetScale = 1.0 / (1.0 + 0.25 * progress);
+          targetScale = Math.max(0.6, Math.min(1.0, targetScale)); // Cap just in case
+          
+          if (Math.abs(targetScale - stateRef.current.ballScale) > 0.001) {
+              const factor = targetScale / stateRef.current.ballScale;
+              Matter.Body.scale(ball, factor, factor);
+              stateRef.current.ballScale = targetScale;
+          }
+
+          // Track highest Y
+          if (!stateRef.current.ballCanShoot && !stateRef.current.isRollingBack) {
+              stateRef.current.highestY = Math.min(stateRef.current.highestY, ball.position.y);
+          }
+
           let mask = CATEGORY_WALL | CATEGORY_SENSOR;
           let isAbove = false;
 
-          if (ball.position.y < targetY + 10) {
-              // Ball is physically above the rim. Collide so it can bounce.
+          // Realistic Rim Physics: 
+          // Ball should collide with rim if it's falling OR if it's physically above the rim level.
+          // If it's going up and hits the rim from below, it should also collide (bounce back).
+          const ballRadiusScaled = BALL_RADIUS * stateRef.current.ballScale;
+          
+          if (ball.position.y < targetY + ballRadiusScaled) {
               mask |= CATEGORY_HOOP;
-              isAbove = true;
-          } else if (ball.velocity.y > 0 && ball.position.y < targetY + 40) {
-              // Ball is falling and just reached the rim level.
-              mask |= CATEGORY_HOOP;
-              isAbove = true;
+              isAbove = ball.position.y < targetY;
           } else {
-              // Ball is below the rim and going up, or far below.
               isAbove = false;
           }
 
           ball.collisionFilter.mask = mask;
           stateRef.current.isAboveHoop = isAbove;
 
+          // Scoring logic
+          if (ball.velocity.y > 0 && ball.position.y > targetY && ball.position.y < targetY + 40) {
+              if (!stateRef.current.hasScored && stateRef.current.highestY < targetY - 10) {
+                  const dx = Math.abs(ball.position.x - targetX);
+                  // Even more forgiving dx for high hit rate
+                  const tolerance = stateRef.current.hoopAmpX > 10 ? 45 : 35;
+                  if (dx < HOOP_WIDTH/2 + tolerance) {
+                      scorePoint();
+                  }
+              }
+          }
+
+          // Net entry physics (Dynamic feel)
+          if (ball.velocity.y > 0 && ball.position.y > targetY - 20 && ball.position.y < targetY + 100 && Math.abs(ball.position.x - targetX) < HOOP_WIDTH/2 + 40) {
+              // 1. Simulate net friction by slowing the ball down
+              Matter.Body.setVelocity(ball, {
+                  x: ball.velocity.x * 0.8,
+                  y: ball.velocity.y * 0.8
+              });
+              // 2. Pull the ball slightly towards the center of the net (Stronger magnet effect)
+              const pullStrength = stateRef.current.hoopAmpX > 10 ? 0.3 : 0.2;
+              const pullX = (targetX - ball.position.x) * pullStrength;
+              Matter.Body.applyForce(ball, ball.position, { x: pullX * 0.001, y: 0 });
+          }
+
           // 3. Net Animation Physics
           let targetStretch = 0;
+          let targetBulge = 0;
+          
           // Only trigger net stretch if the ENTIRE ball has passed the rim (y - radius > targetY)
-          if (ball.velocity.y > 0 && (ball.position.y - BALL_RADIUS) > targetY && ball.position.y < targetY + 150 && 
-              Math.abs(ball.position.x - targetX) < HOOP_WIDTH / 2) {
+          if (ball.velocity.y > 0 && (ball.position.y - BALL_RADIUS * stateRef.current.ballScale) > targetY && ball.position.y < targetY + 150 && 
+              Math.abs(ball.position.x - targetX) < HOOP_WIDTH / 2 + 10) {
               // Ball is falling inside the net
               targetStretch = (ball.position.y - targetY) * 0.8; 
+              // Localized bulge is handled in the drawing code now
+              targetBulge = 0;
           } else if (stateRef.current.hasScored && ball.position.y >= targetY + 100 && ball.position.y < targetY + 200) {
               // Ball just passed through, give it a final tug
               targetStretch = 40;
+              stateRef.current.netSwayVelocity = ball.velocity.x * 0.25; // Trigger sway
+              targetBulge = 0; // No inward ripple to prevent springy look
           }
 
-          const stretchForce = (targetStretch - stateRef.current.netStretch) * 0.2; // Softer spring for rope feel
+          const stretchForce = (targetStretch - stateRef.current.netStretch) * 0.1; // Less springy
           stateRef.current.netVelocity += stretchForce;
           stateRef.current.netStretch += stateRef.current.netVelocity;
-          stateRef.current.netVelocity *= 0.85; // Damping
+          stateRef.current.netVelocity *= 0.6; // High damping
+          
+          const swayForce = -stateRef.current.netSway * 0.05;
+          stateRef.current.netSwayVelocity += swayForce;
+          stateRef.current.netSway += stateRef.current.netSwayVelocity;
+          stateRef.current.netSwayVelocity *= 0.85; // Sway damping
+          
+          const bulgeForce = (targetBulge - stateRef.current.netBulge) * 0.1;
+          stateRef.current.netBulgeVelocity += bulgeForce;
+          stateRef.current.netBulge += stateRef.current.netBulgeVelocity;
+          stateRef.current.netBulgeVelocity *= 0.6; // High damping
+
+          // Trail
+          if (stateRef.current.gameState === 'PLAYING' && !stateRef.current.isRollingBack && !stateRef.current.ballCanShoot) {
+              stateRef.current.ballTrail.push({ x: ball.position.x, y: ball.position.y, scale: stateRef.current.ballScale });
+              if (stateRef.current.ballTrail.length > 8) {
+                  stateRef.current.ballTrail.shift();
+              }
+          } else {
+              stateRef.current.ballTrail = [];
+          }
 
           // 4. Check Game Over / Reset / Rollback
           if (!stateRef.current.isRollingBack && (ball.position.y > height + BALL_RADIUS || ball.position.x < -50 || ball.position.x > width + 50)) {
@@ -623,11 +790,15 @@ export default function App() {
               const startX = stateRef.current.rollBackStartX;
               const rollStartY = height + BALL_RADIUS;
               const endX = width / 2;
-              const endY = height - 150 - BALL_RADIUS; // Starting Y position
+              const endY = height - 110 - BALL_RADIUS; // Starting Y position
+              
+              // Add a parabolic arc to the return trajectory
+              const arcHeight = 200;
+              const currentY = rollStartY + (endY - rollStartY) * easeOut - Math.sin(easeOut * Math.PI) * arcHeight;
               
               Matter.Body.setPosition(ball, {
                   x: startX + (endX - startX) * easeOut,
-                  y: rollStartY + (endY - rollStartY) * easeOut
+                  y: currentY
               });
               
               // Spin the ball as it rolls back
@@ -670,12 +841,13 @@ export default function App() {
                       const targetY = stateRef.current.hoopBaseY;
                       Matter.Body.setPosition(parts.rimL, { x: targetX - HOOP_WIDTH/2, y: targetY });
                       Matter.Body.setPosition(parts.rimR, { x: targetX + HOOP_WIDTH/2, y: targetY });
-                      Matter.Body.setPosition(parts.sensor, { x: targetX, y: targetY + 40 });
+                      Matter.Body.setVelocity(parts.rimL, { x: 0, y: 0 });
+                      Matter.Body.setVelocity(parts.rimR, { x: 0, y: 0 });
                   }
               }
               
               if (stateRef.current.ballCanShoot && ballRef.current) {
-                  Matter.Body.setPosition(ballRef.current, { x: width / 2, y: height - 150 - BALL_RADIUS });
+                  Matter.Body.setPosition(ballRef.current, { x: width / 2, y: height - 110 - BALL_RADIUS });
               }
               
               const bodies = Matter.Composite.allBodies(engineRef.current.world);
@@ -725,14 +897,32 @@ export default function App() {
         onPointerLeave={handlePointerUp}
       >
         {/* Top UI */}
-        <div className="absolute top-6 left-6 z-20 flex flex-col">
-            <div className="flex items-center gap-2">
-                <span className="text-white text-3xl font-black drop-shadow-md">👑</span>
-                <span className="text-white text-3xl font-black drop-shadow-md">{bestScore}</span>
+        <div className="absolute top-6 left-6 z-20">
+            <div className="w-10 h-10 bg-white/20 rounded-full flex flex-col items-center justify-center gap-1 cursor-pointer hover:bg-white/30 transition-colors">
+                <div className="w-5 h-1 bg-white rounded-full"></div>
+                <div className="w-5 h-1 bg-white rounded-full"></div>
+                <div className="w-5 h-1 bg-white rounded-full"></div>
             </div>
-            <div className="flex items-center gap-2 mt-1">
-                <span className="text-white text-3xl font-black drop-shadow-md">🏀</span>
-                <span className="text-white text-3xl font-black drop-shadow-md">{score}</span>
+        </div>
+        
+        <div className="absolute top-6 right-6 z-20 flex flex-col items-end gap-2">
+            {/* Best Score Badge */}
+            <div className="flex items-center bg-black/30 backdrop-blur-sm rounded-full px-3 py-1 border border-white/10">
+                <span className="text-white/60 font-bold text-[10px] uppercase tracking-wider mr-2">Best</span>
+                <span className="text-[#F1C40F] font-black text-lg drop-shadow-md">{bestScore}</span>
+            </div>
+            
+            {/* Total Goals Badge (Now Session Score) */}
+            <div className="flex items-center bg-black/30 backdrop-blur-sm rounded-full pr-4 pl-1 py-1 border border-white/10">
+                <div className="w-8 h-8 bg-[#E67E22] rounded-full flex items-center justify-center border-2 border-[#D35400] mr-2 shadow-inner relative overflow-hidden">
+                    {/* Basketball Icon */}
+                    <div className="absolute inset-0 border-b-2 border-[#D35400] top-1/2 -translate-y-1/2"></div>
+                    <div className="absolute inset-0 border-r-2 border-[#D35400] left-1/2 -translate-x-1/2"></div>
+                    <div className="absolute inset-0 border-2 border-[#D35400] rounded-full scale-75 opacity-50"></div>
+                    <div className="absolute inset-0 border-2 border-[#D35400] rounded-full scale-110 -translate-x-1/2 -translate-y-1/2 left-0 top-0 opacity-30"></div>
+                    <div className="absolute inset-0 border-2 border-[#D35400] rounded-full scale-110 translate-x-1/2 translate-y-1/2 right-0 bottom-0 opacity-30"></div>
+                </div>
+                <span className="text-white font-black text-xl drop-shadow-md">{score}</span>
             </div>
         </div>
 
@@ -743,7 +933,7 @@ export default function App() {
                 <motion.div
                     key={ft.id}
                     initial={{ opacity: 0, y: ft.y, x: ft.x, scale: 0.5 }}
-                    animate={{ opacity: 1, y: ft.y - 120, scale: 1.5 }}
+                    animate={{ opacity: 1, y: ft.y - 120, x: ft.x, scale: 1.5 }}
                     exit={{ opacity: 0 }}
                     transition={{ duration: 1, ease: "easeOut" }}
                     className="absolute font-black text-6xl z-40 pointer-events-none"
