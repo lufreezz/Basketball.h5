@@ -29,10 +29,10 @@ const playShootSound = () => {
     if (!audioCtx) return;
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
-    osc.type = 'sine';
+    osc.type = 'square';
     osc.frequency.setValueAtTime(400, audioCtx.currentTime);
     osc.frequency.exponentialRampToValueAtTime(100, audioCtx.currentTime + 0.15);
-    gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.15);
     osc.connect(gain);
     gain.connect(audioCtx.destination);
@@ -52,13 +52,13 @@ const playSwishSound = () => {
     noise.buffer = buffer;
     
     const filter = audioCtx.createBiquadFilter();
-    filter.type = 'bandpass';
-    filter.frequency.value = 1200;
-    filter.Q.value = 0.5;
+    filter.type = 'lowpass';
+    filter.frequency.value = 800;
+    filter.Q.value = 1;
     
     const gain = audioCtx.createGain();
-    gain.gain.setValueAtTime(0.4, audioCtx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
+    gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
     
     noise.connect(filter);
     filter.connect(gain);
@@ -70,10 +70,10 @@ const playScoreSound = () => {
     if (!audioCtx) return;
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
-    osc.type = 'sine';
+    osc.type = 'square';
     osc.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
     osc.frequency.setValueAtTime(1108.73, audioCtx.currentTime + 0.1); // C#6
-    gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.4);
     osc.connect(gain);
     gain.connect(audioCtx.destination);
@@ -95,7 +95,7 @@ export default function App() {
   const runnerRef = useRef<Matter.Runner | null>(null);
   
   const ballRef = useRef<Matter.Body | null>(null);
-  const hoopPartsRef = useRef<{rimL: Matter.Body, rimR: Matter.Body} | null>(null);
+  const hoopPartsRef = useRef<{rimL: Matter.Body, rimR: Matter.Body, rimBlocker?: Matter.Body} | null>(null);
   
   const reqRef = useRef<number>(0);
   
@@ -190,9 +190,15 @@ export default function App() {
 
       const rimL = Matter.Bodies.circle(0, 0, HOOP_RADIUS, hoopOptions);
       const rimR = Matter.Bodies.circle(0, 0, HOOP_RADIUS, hoopOptions);
+      const rimBlocker = Matter.Bodies.rectangle(0, 0, HOOP_WIDTH, 10, {
+          isStatic: true,
+          restitution: 0.4,
+          friction: 0.5,
+          collisionFilter: { category: CATEGORY_HOOP, mask: 0 } // Initially off
+      });
       
-      hoopPartsRef.current = { rimL, rimR };
-      Matter.Composite.add(engine.world, [rimL, rimR]);
+      hoopPartsRef.current = { rimL, rimR, rimBlocker };
+      Matter.Composite.add(engine.world, [rimL, rimR, rimBlocker]);
 
       const runner = Matter.Runner.create();
       runnerRef.current = runner;
@@ -321,15 +327,20 @@ export default function App() {
               if (vy < -32) vy = -32; // Cap maximum height (just above backboard)
               if (vy > -22) vy = -22; // Minimum height to reach hoop
               
-              // Aim Assist: Calculate ideal VX to reach hoop
+              // Aim Assist: Predict future hoop position
               const { width } = containerRef.current.getBoundingClientRect();
-              const hoopX = hoopPartsRef.current?.rimL?.position?.x ? hoopPartsRef.current.rimL.position.x + HOOP_WIDTH/2 : width/2;
-              const timeToHoop = Math.abs(distanceY / vy) * 1.8; // Rough estimate of time to reach hoop height
-              const idealVx = (hoopX - ballPos.x) / timeToHoop;
+              const timeToHoop = Math.abs(distanceY / vy) * 1.8; // Rough estimate of steps to reach hoop height
               
-              // Blend player's swipe VX with ideal VX (70% aim assist for better hit rate)
-              const playerVx = clampedDx * 0.10 * distanceRatio;
-              const vx = playerVx * 0.3 + idealVx * 0.7;
+              // Pure swipe mechanics for authentic angle and bank shots
+              // Use the ratio of horizontal swipe to vertical swipe to determine horizontal velocity
+              let vx = (clampedDx / Math.abs(clampedDy)) * Math.abs(vy);
+              
+              // Dampen the horizontal speed slightly for better playability
+              vx = vx * 0.8;
+              
+              // Cap maximum horizontal speed to prevent ball from flying out of bounds too fast
+              if (vx > 18) vx = 18;
+              if (vx < -18) vx = -18;
               
               Matter.Body.setStatic(ballRef.current, false);
               Matter.Sleeping.set(ballRef.current, false);
@@ -350,95 +361,160 @@ export default function App() {
       const ctx = canvas?.getContext('2d');
       if (!canvas || !ctx || !containerRef.current) return;
 
-      const { width, height } = canvas;
+      const { width, height } = containerRef.current.getBoundingClientRect();
       const { hoopY, netStretch } = stateRef.current;
       const hoopX = hoopPartsRef.current?.rimL?.position?.x ? hoopPartsRef.current.rimL.position.x + HOOP_WIDTH/2 : width/2;
       const startY = height - 150;
 
+      ctx.save();
       ctx.clearRect(0, 0, width, height);
 
-      // 1. Background (Wall)
-      ctx.fillStyle = '#90C8C6';
+      // 1. Background (High School Gym - Slam Dunk Style)
+      // Wall
+      ctx.fillStyle = '#E8ECEF';
       ctx.fillRect(0, 0, width, height);
+      
+      // Wall Panels / Bleachers
+      ctx.fillStyle = '#CFD8DC';
+      ctx.fillRect(0, height * 0.4, width, height * 0.2);
+      ctx.strokeStyle = '#B0BEC5';
+      ctx.lineWidth = 2;
+      for (let i = 0; i < width; i += 40) {
+          ctx.beginPath(); ctx.moveTo(i, height * 0.4); ctx.lineTo(i, height * 0.6); ctx.stroke();
+      }
 
-      // 2. Floor
-      const floorY = height - 150;
+      // Large Gym Windows
+      ctx.fillStyle = '#81D4FA'; // Sky blue outside
+      ctx.fillRect(width * 0.1, height * 0.1, width * 0.3, height * 0.25);
+      ctx.fillRect(width * 0.6, height * 0.1, width * 0.3, height * 0.25);
       
-      // Floor shadow/depth
-      ctx.fillStyle = '#2C5A63';
-      ctx.fillRect(0, floorY, width, height - floorY);
-      
-      // Floor top surface
-      ctx.fillStyle = '#3A7580';
+      // Window Frames
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 6;
+      ctx.strokeRect(width * 0.1, height * 0.1, width * 0.3, height * 0.25);
+      ctx.strokeRect(width * 0.6, height * 0.1, width * 0.3, height * 0.25);
+      ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.moveTo(0, floorY + 50);
-      ctx.lineTo(width * 0.15, floorY);
-      ctx.lineTo(width * 0.85, floorY);
-      ctx.lineTo(width, floorY + 50);
-      ctx.lineTo(width, height);
+      ctx.moveTo(width * 0.25, height * 0.1); ctx.lineTo(width * 0.25, height * 0.35);
+      ctx.moveTo(width * 0.1, height * 0.225); ctx.lineTo(width * 0.4, height * 0.225);
+      ctx.moveTo(width * 0.75, height * 0.1); ctx.lineTo(width * 0.75, height * 0.35);
+      ctx.moveTo(width * 0.6, height * 0.225); ctx.lineTo(width * 0.9, height * 0.225);
+      ctx.stroke();
+
+      // Sunbeams
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+      ctx.beginPath();
+      ctx.moveTo(width * 0.1, height * 0.1);
+      ctx.lineTo(width * 0.4, height * 0.1);
+      ctx.lineTo(width * 0.6, height);
       ctx.lineTo(0, height);
       ctx.fill();
 
-      // Floor border
-      ctx.strokeStyle = '#D35400';
-      ctx.lineWidth = 8;
-      ctx.beginPath();
-      ctx.moveTo(-10, floorY + 50);
-      ctx.lineTo(width * 0.15, floorY);
-      ctx.lineTo(width * 0.85, floorY);
-      ctx.lineTo(width + 10, floorY + 50);
-      ctx.stroke();
-
-      // Inner court line
-      ctx.strokeStyle = '#2C5A63';
-      ctx.lineWidth = 4;
+      // 2. Floor - Polished Maple Wood Court
+      const floorY = height - 150;
+      
+      // Floor Base
+      ctx.fillStyle = '#D79E5C';
+      ctx.fillRect(0, floorY, width, height - floorY);
+      
+      // Wood Planks (Perspective)
+      ctx.strokeStyle = '#C68A47';
+      ctx.lineWidth = 1;
+      const vanishX = width / 2;
+      for(let i=-20; i<=20; i++) {
+          const startX = vanishX + i * 40;
+          ctx.beginPath(); 
+          ctx.moveTo(vanishX + i*10, floorY); 
+          ctx.lineTo(startX, height); 
+          ctx.stroke();
+      }
+      
+      // Court Lines (White & Red)
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 5;
       ctx.beginPath();
       ctx.moveTo(0, floorY + 60);
-      ctx.lineTo(width * 0.15 + 5, floorY + 10);
-      ctx.lineTo(width * 0.85 - 5, floorY + 10);
+      ctx.lineTo(width * 0.15, floorY + 10);
+      ctx.lineTo(width * 0.85, floorY + 10);
       ctx.lineTo(width, floorY + 60);
       ctx.stroke();
+      
+      // Paint Area (Red)
+      ctx.fillStyle = 'rgba(211, 47, 47, 0.85)';
+      ctx.beginPath();
+      ctx.moveTo(width * 0.35, floorY + 60);
+      ctx.lineTo(width * 0.4, floorY + 10);
+      ctx.lineTo(width * 0.6, floorY + 10);
+      ctx.lineTo(width * 0.65, floorY + 60);
+      ctx.fill();
+
+      // Floor Reflection
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+      ctx.fillRect(0, floorY, width, height - floorY);
 
       // Ball Shadow on Floor
-      const shadowY = floorY + 40; // The ground level for the ball
+      const shadowY = floorY + 40;
       if (ballRef.current && ballRef.current.position.y > shadowY - 200) {
           const heightFromGround = shadowY - BALL_RADIUS - ballRef.current.position.y;
           const shadowScale = Math.max(0, 1 - heightFromGround / 200);
-          ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+          const sw = 90 * stateRef.current.ballScale * shadowScale;
+          const sh = 24 * stateRef.current.ballScale * shadowScale;
           ctx.beginPath();
-          ctx.ellipse(ballRef.current.position.x, shadowY, 45 * stateRef.current.ballScale * shadowScale, 12 * stateRef.current.ballScale * shadowScale, 0, 0, Math.PI * 2);
+          ctx.ellipse(ballRef.current.position.x, shadowY, sw/2, sh/2, 0, 0, Math.PI * 2);
           ctx.fill();
       }
 
-      // 3. Backboard Shadow
-      const bbW = 260;
-      const bbH = 180;
+      // 3. Hoop Pole & Backboard Shadow
+      const bbW = 200;
+      const bbH = 140;
       const bbX = hoopX;
-      const bbY = hoopY - 50;
+      const bbY = hoopY - 40;
+
+      // Pole (Silver/Gray)
+      const poleGrad = ctx.createLinearGradient(hoopX - 10, 0, hoopX + 10, 0);
+      poleGrad.addColorStop(0, '#78909C');
+      poleGrad.addColorStop(0.5, '#CFD8DC');
+      poleGrad.addColorStop(1, '#546E7A');
+      ctx.fillStyle = poleGrad;
+      ctx.fillRect(hoopX - 10, bbY, 20, floorY - bbY + 20);
       
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+      // Pole Padding (Red)
+      ctx.fillStyle = '#D32F2F';
+      ctx.fillRect(hoopX - 15, floorY - 100, 30, 100);
+      ctx.strokeStyle = '#B71C1C';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(hoopX - 15, floorY - 100, 30, 100);
+
+      // Backboard Shadow
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+      ctx.fillRect(bbX - bbW/2 + 10, bbY - bbH/2 + 10, bbW, bbH);
+
+      // 4. Backboard (Smoked Glass)
+      ctx.fillStyle = 'rgba(38, 50, 56, 0.85)'; // Dark blue-grey tinted glass
+      ctx.fillRect(bbX - bbW/2, bbY - bbH/2, bbW, bbH);
+      
+      // Glass Reflection
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
       ctx.beginPath();
       ctx.moveTo(bbX - bbW/2, bbY - bbH/2);
-      ctx.lineTo(bbX - bbW/2 + 1000, bbY - bbH/2 + 1000);
-      ctx.lineTo(bbX + bbW/2 + 1000, bbY + bbH/2 + 1000);
-      ctx.lineTo(bbX + bbW/2, bbY + bbH/2);
+      ctx.lineTo(bbX + bbW/2, bbY - bbH/2);
+      ctx.lineTo(bbX + bbW/2 - 40, bbY + bbH/2);
+      ctx.lineTo(bbX - bbW/2, bbY + bbH/2);
       ctx.fill();
 
-      // 4. Backboard
-      ctx.fillStyle = '#C04A15'; // Outer brown
-      ctx.fillRect(bbX - bbW/2, bbY - bbH/2, bbW, bbH);
-      ctx.fillStyle = '#E67E22'; // Inner orange
-      ctx.fillRect(bbX - bbW/2 + 6, bbY - bbH/2 + 6, bbW - 12, bbH - 12);
-      ctx.fillStyle = '#3A7580'; // Inner teal
-      ctx.fillRect(bbX - bbW/2 + 12, bbY - bbH/2 + 12, bbW - 24, bbH - 24);
-
-      // Inner Yellow Square
-      const sqW = 90;
-      const sqH = 70;
-      ctx.strokeStyle = '#F1C40F';
+      // Backboard Border
+      ctx.strokeStyle = '#FFFFFF';
       ctx.lineWidth = 6;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
+      ctx.strokeRect(bbX - bbW/2, bbY - bbH/2, bbW, bbH);
+
+      // Inner Square (White)
+      const sqW = 70;
+      const sqH = 50;
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 4;
+      ctx.lineCap = 'square';
+      ctx.lineJoin = 'miter';
       ctx.strokeRect(hoopX - sqW/2, hoopY - sqH, sqW, sqH);
 
       // Helper to draw the ball
@@ -453,15 +529,23 @@ export default function App() {
           ctx.rotate(angle);
           ctx.scale(scale, scale);
 
-          // Ball Base
-          ctx.fillStyle = '#D35400';
+          // Ball Base (Realistic Orange with Gradient)
+          const ballGrad = ctx.createRadialGradient(-BALL_RADIUS*0.3, -BALL_RADIUS*0.3, BALL_RADIUS*0.1, 0, 0, BALL_RADIUS);
+          ballGrad.addColorStop(0, '#FFB74D'); // Highlight
+          ballGrad.addColorStop(0.4, '#F57C00'); // Base
+          ballGrad.addColorStop(1, '#E65100'); // Shadow
+          
+          ctx.fillStyle = ballGrad;
           ctx.beginPath();
           ctx.arc(0, 0, BALL_RADIUS, 0, Math.PI * 2);
           ctx.fill();
           
-          // Ball Lines
-          ctx.strokeStyle = '#8E3800';
-          ctx.lineWidth = 2;
+          // Ball Lines (Curved, Realistic)
+          ctx.strokeStyle = '#212121';
+          ctx.lineWidth = 2.5;
+          ctx.lineCap = 'round';
+          
+          // Cross lines
           ctx.beginPath();
           ctx.moveTo(0, -BALL_RADIUS);
           ctx.lineTo(0, BALL_RADIUS);
@@ -469,24 +553,11 @@ export default function App() {
           ctx.lineTo(BALL_RADIUS, 0);
           ctx.stroke();
 
+          // Curved lines
           ctx.beginPath();
           ctx.ellipse(0, 0, BALL_RADIUS * 0.6, BALL_RADIUS, 0, 0, Math.PI * 2);
           ctx.stroke();
 
-          ctx.restore();
-
-          // Fixed Highlight (doesn't rotate)
-          ctx.save();
-          ctx.translate(pos.x, pos.y);
-          ctx.scale(scale, scale);
-          ctx.beginPath();
-          ctx.arc(0, 0, BALL_RADIUS, 0, Math.PI * 2);
-          ctx.clip(); // Clip to ball bounds
-          
-          ctx.beginPath();
-          ctx.arc(-BALL_RADIUS*0.2, -BALL_RADIUS*0.2, BALL_RADIUS*0.8, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
-          ctx.fill();
           ctx.restore();
       };
 
@@ -508,9 +579,9 @@ export default function App() {
           drawBall();
       }
 
-      // 5. Net (4 ropes hanging down)
+      // 5. Net (Realistic White)
       ctx.strokeStyle = '#FFFFFF';
-      ctx.lineWidth = 3;
+      ctx.lineWidth = 2;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       ctx.beginPath();
@@ -582,12 +653,12 @@ export default function App() {
       
       ctx.stroke();
 
-      // 6. Front Rim (Straight Line)
+      // 6. Front Rim (Realistic Orange/Red)
       ctx.beginPath();
       ctx.moveTo(hoopX - HOOP_WIDTH/2 - 4, hoopY);
       ctx.lineTo(hoopX + HOOP_WIDTH/2 + 4, hoopY);
-      ctx.strokeStyle = '#FF8C00';
-      ctx.lineWidth = 10;
+      ctx.strokeStyle = '#E64A19';
+      ctx.lineWidth = 8;
       ctx.lineCap = 'round';
       ctx.stroke();
       
@@ -595,8 +666,8 @@ export default function App() {
       ctx.beginPath();
       ctx.moveTo(hoopX - HOOP_WIDTH/2 - 2, hoopY - 2);
       ctx.lineTo(hoopX + HOOP_WIDTH/2 + 2, hoopY - 2);
-      ctx.strokeStyle = '#FFAA33';
-      ctx.lineWidth = 4;
+      ctx.strokeStyle = '#FF8A65';
+      ctx.lineWidth = 2;
       ctx.lineCap = 'round';
       ctx.stroke();
 
@@ -604,6 +675,8 @@ export default function App() {
       if (!drawBallBehindFrontRim) {
           drawBall();
       }
+      
+      ctx.restore(); // Restore pixel scale
   };
 
   const update = () => {
@@ -619,12 +692,12 @@ export default function App() {
           let speedY = 0;
 
           if (stateRef.current.score >= 10) {
-              targetAmpX = width * 0.25;
-              speedX = Math.min(0.2 + (stateRef.current.score - 10) * 0.025, 0.625);
+              targetAmpX = width * 0.20;
+              speedX = Math.min(0.15 + (stateRef.current.score - 10) * 0.015, 0.45);
           }
           if (stateRef.current.score >= 20) {
-              targetAmpY = height * 0.1;
-              speedY = Math.min(0.15 + (stateRef.current.score - 20) * 0.02, 0.5);
+              targetAmpY = height * 0.08;
+              speedY = Math.min(0.1 + (stateRef.current.score - 20) * 0.01, 0.35);
           }
 
           // Smoothly interpolate amplitude to prevent teleporting
@@ -649,9 +722,17 @@ export default function App() {
           stateRef.current.hoopY = targetY;
           Matter.Body.setPosition(parts.rimL, { x: targetX - HOOP_WIDTH/2, y: targetY });
           Matter.Body.setPosition(parts.rimR, { x: targetX + HOOP_WIDTH/2, y: targetY });
+          if (parts.rimBlocker) {
+              Matter.Body.setPosition(parts.rimBlocker, { x: targetX, y: targetY });
+          }
           // Reset velocity and positionPrev to prevent static bodies from imparting high elasticity to the ball
           Matter.Body.setVelocity(parts.rimL, { x: 0, y: 0 });
           Matter.Body.setVelocity(parts.rimR, { x: 0, y: 0 });
+          if (parts.rimBlocker) {
+              Matter.Body.setVelocity(parts.rimBlocker, { x: 0, y: 0 });
+              parts.rimBlocker.positionPrev.x = parts.rimBlocker.position.x;
+              parts.rimBlocker.positionPrev.y = parts.rimBlocker.position.y;
+          }
           parts.rimL.positionPrev.x = parts.rimL.position.x;
           parts.rimL.positionPrev.y = parts.rimL.position.y;
           parts.rimR.positionPrev.x = parts.rimR.position.x;
@@ -699,11 +780,21 @@ export default function App() {
           ball.collisionFilter.mask = mask;
           stateRef.current.isAboveHoop = isAbove;
 
+          // Enable rimBlocker if the ball is falling but didn't clear the rim
+          if (parts.rimBlocker) {
+              if (ball.velocity.y > 0 && stateRef.current.highestY > targetY - ballRadiusScaled) {
+                  parts.rimBlocker.collisionFilter.mask = CATEGORY_BALL;
+              } else {
+                  parts.rimBlocker.collisionFilter.mask = 0;
+              }
+          }
+
           // Scoring logic
           if (ball.velocity.y > 0 && ball.position.y > targetY && ball.position.y < targetY + 40) {
-              if (!stateRef.current.hasScored && stateRef.current.highestY < targetY - 10) {
+              // Ball must fully clear the rim to score
+              if (!stateRef.current.hasScored && stateRef.current.highestY < targetY - ballRadiusScaled) {
                   const dx = Math.abs(ball.position.x - targetX);
-                  // Even more forgiving dx for high hit rate
+                  // Forgiving dx for high hit rate
                   const tolerance = stateRef.current.hoopAmpX > 10 ? 45 : 35;
                   if (dx < HOOP_WIDTH/2 + tolerance) {
                       scorePoint();
@@ -826,6 +917,8 @@ export default function App() {
 
           canvas.width = width;
           canvas.height = height;
+          canvas.style.width = `${width}px`;
+          canvas.style.height = `${height}px`;
           
           if (!engineRef.current) {
               initPhysics(width, height);
@@ -886,10 +979,10 @@ export default function App() {
   // Trajectory removed for swipe mechanic
 
   return (
-    <div className="relative w-full h-screen bg-[#111] flex justify-center overflow-hidden touch-none select-none">
+    <div className="relative w-full h-screen bg-[#111] flex justify-center overflow-hidden touch-none select-none" style={{ fontFamily: 'Impact, "Arial Black", sans-serif' }}>
       <div 
         ref={containerRef}
-        className="relative w-full max-w-md h-full bg-[#9ED1D1] cursor-pointer shadow-2xl touch-none"
+        className="relative w-full max-w-md h-full bg-[#E8ECEF] cursor-pointer shadow-2xl touch-none"
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
@@ -898,31 +991,31 @@ export default function App() {
       >
         {/* Top UI */}
         <div className="absolute top-6 left-6 z-20">
-            <div className="w-10 h-10 bg-white/20 rounded-full flex flex-col items-center justify-center gap-1 cursor-pointer hover:bg-white/30 transition-colors">
-                <div className="w-5 h-1 bg-white rounded-full"></div>
-                <div className="w-5 h-1 bg-white rounded-full"></div>
-                <div className="w-5 h-1 bg-white rounded-full"></div>
+            <div className="w-10 h-10 bg-white/90 flex flex-col items-center justify-center gap-1 cursor-pointer hover:bg-gray-200 transition-colors border-2 border-black shadow-[4px_4px_0px_rgba(0,0,0,1)] rounded-sm">
+                <div className="w-5 h-1 bg-black"></div>
+                <div className="w-5 h-1 bg-black"></div>
+                <div className="w-5 h-1 bg-black"></div>
             </div>
         </div>
         
         <div className="absolute top-6 right-6 z-20 flex flex-col items-end gap-2">
             {/* Best Score Badge */}
-            <div className="flex items-center bg-black/30 backdrop-blur-sm rounded-full px-3 py-1 border border-white/10">
-                <span className="text-white/60 font-bold text-[10px] uppercase tracking-wider mr-2">Best</span>
-                <span className="text-[#F1C40F] font-black text-lg drop-shadow-md">{bestScore}</span>
+            <div className="flex items-center bg-white/90 px-3 py-2 border-2 border-black shadow-[4px_4px_0px_rgba(0,0,0,1)] rounded-sm">
+                <span className="text-black text-[10px] uppercase tracking-wider mr-2 font-bold">BEST</span>
+                <span className="text-[#D32F2F] text-lg font-bold">{bestScore}</span>
             </div>
             
             {/* Total Goals Badge (Now Session Score) */}
-            <div className="flex items-center bg-black/30 backdrop-blur-sm rounded-full pr-4 pl-1 py-1 border border-white/10">
-                <div className="w-8 h-8 bg-[#E67E22] rounded-full flex items-center justify-center border-2 border-[#D35400] mr-2 shadow-inner relative overflow-hidden">
+            <div className="flex items-center bg-white/90 pr-4 pl-2 py-2 border-2 border-black shadow-[4px_4px_0px_rgba(0,0,0,1)] rounded-sm">
+                <div className="w-6 h-6 bg-[#F57C00] rounded-full flex items-center justify-center border-2 border-black mr-2 relative overflow-hidden">
                     {/* Basketball Icon */}
-                    <div className="absolute inset-0 border-b-2 border-[#D35400] top-1/2 -translate-y-1/2"></div>
-                    <div className="absolute inset-0 border-r-2 border-[#D35400] left-1/2 -translate-x-1/2"></div>
-                    <div className="absolute inset-0 border-2 border-[#D35400] rounded-full scale-75 opacity-50"></div>
-                    <div className="absolute inset-0 border-2 border-[#D35400] rounded-full scale-110 -translate-x-1/2 -translate-y-1/2 left-0 top-0 opacity-30"></div>
-                    <div className="absolute inset-0 border-2 border-[#D35400] rounded-full scale-110 translate-x-1/2 translate-y-1/2 right-0 bottom-0 opacity-30"></div>
+                    <div className="absolute inset-0 border-b-2 border-black top-1/2 -translate-y-1/2"></div>
+                    <div className="absolute inset-0 border-r-2 border-black left-1/2 -translate-x-1/2"></div>
+                    <div className="absolute inset-0 border-2 border-black rounded-full scale-75 opacity-50"></div>
+                    <div className="absolute inset-0 border-2 border-black rounded-full scale-110 -translate-x-1/2 -translate-y-1/2 left-0 top-0 opacity-30"></div>
+                    <div className="absolute inset-0 border-2 border-black rounded-full scale-110 translate-x-1/2 translate-y-1/2 right-0 bottom-0 opacity-30"></div>
                 </div>
-                <span className="text-white font-black text-xl drop-shadow-md">{score}</span>
+                <span className="text-black text-lg font-bold">{score}</span>
             </div>
         </div>
 
@@ -936,17 +1029,17 @@ export default function App() {
                     animate={{ opacity: 1, y: ft.y - 120, x: ft.x, scale: 1.5 }}
                     exit={{ opacity: 0 }}
                     transition={{ duration: 1, ease: "easeOut" }}
-                    className="absolute font-black text-6xl z-40 pointer-events-none"
+                    className="absolute text-3xl z-40 pointer-events-none font-bold italic"
                     style={{ 
                         left: 0, 
                         top: 0, 
-                        marginLeft: '-2rem',
-                        color: '#FFD700',
-                        WebkitTextStroke: '2px #C35325',
-                        textShadow: '0px 4px 10px rgba(0,0,0,0.5)'
+                        marginLeft: '-1rem',
+                        color: '#D32F2F',
+                        textShadow: '2px 2px 0 #000, -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 4px 4px 0 rgba(0,0,0,0.5)',
+                        transform: 'skewX(-10deg)'
                     }}
                 >
-                    +1
+                    SWISH!
                 </motion.div>
             ))}
         </AnimatePresence>
@@ -956,19 +1049,19 @@ export default function App() {
            {gameState === 'START' && (
                <motion.div 
                    initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                   className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-black/20 backdrop-blur-sm pointer-events-none"
+                   className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-black/60 pointer-events-none backdrop-blur-sm"
                >
-                  <div className="text-white text-4xl font-black mb-4 tracking-widest drop-shadow-lg text-center">
-                      TAP TO<br/>START
+                  <div className="text-white text-6xl mb-8 text-center leading-tight font-bold italic skew-x-[-5deg]" style={{ textShadow: '4px 4px 0 #000' }}>
+                      SLAM<br/><span className="text-[#D32F2F]">HOOPS</span>
                   </div>
-                  <div className="text-white/90 text-xl font-bold mb-8 tracking-widest drop-shadow-lg text-center">
+                  <div className="text-white text-sm mb-12 text-center font-bold tracking-widest animate-pulse" style={{ textShadow: '2px 2px 0 #000' }}>
                       SWIPE UP TO SHOOT
                   </div>
-                  <div className="w-16 h-24 border-4 border-white rounded-full flex justify-center p-2 opacity-80">
+                  <div className="w-12 h-20 border-4 border-white flex justify-center p-2 opacity-80">
                       <motion.div 
-                          animate={{ y: [40, 0, 40] }} 
-                          transition={{ repeat: Infinity, duration: 1.5, ease: "easeInOut" }}
-                          className="w-4 h-4 bg-white rounded-full"
+                          animate={{ y: [30, 0, 30] }} 
+                          transition={{ repeat: Infinity, duration: 1.5, ease: "linear" }}
+                          className="w-4 h-4 bg-[#D32F2F]"
                       />
                   </div>
                </motion.div>
@@ -976,11 +1069,11 @@ export default function App() {
            {gameState === 'GAME_OVER' && (
                <motion.div 
                    initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                   className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-[#3A6B74]/90 backdrop-blur-md pointer-events-none"
+                   className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-black/60 pointer-events-none backdrop-blur-sm"
                >
-                  <div className="text-white text-6xl font-black mb-2 drop-shadow-lg">MISSED!</div>
-                  <div className="text-[#EED663] text-3xl font-bold mb-12 drop-shadow-md">SCORE: {score}</div>
-                  <div className="bg-[#C85A28] text-white px-10 py-4 rounded-xl font-black text-2xl shadow-[0_6px_0_#9c431b] animate-bounce">
+                  <div className="text-white text-xl mb-2 font-bold tracking-widest" style={{ textShadow: '2px 2px 0 #000' }}>SCORE</div>
+                  <div className="text-7xl text-[#D32F2F] mb-12 font-bold" style={{ textShadow: '4px 4px 0 #000' }}>{score}</div>
+                  <div className="bg-[#D32F2F] text-white px-8 py-4 border-4 border-black text-xl font-bold italic skew-x-[-5deg] shadow-[6px_6px_0_#000] animate-pulse">
                      TAP TO RESTART
                   </div>
                </motion.div>
